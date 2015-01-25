@@ -5,10 +5,13 @@
 // @include        http://*
 // @include        https://*
 // @exclude        https://mail.google.com/*
+// @exclude        http://b.hatena.ne.jp/*
+// @exclude        http://www.facebook.com/plugins/like.php*
+// @exclude        http://api.tweetmeme.com/button.js*
 // ==/UserScript==
 //
 // auther:  swdyh http://d.hatena.ne.jp/swdyh/
-// version: 0.0.31 2008-06-29T03:49:37+09:00
+// version: 0.0.60 2011-10-02T17:40:35+09:00
 //
 // this script based on
 // GoogleAutoPager(http://la.ma.la/blog/diary_200506231749.htm) and
@@ -19,15 +22,25 @@
 // http://www.gnu.org/copyleft/gpl.html
 //
 
-var HTML_NAMESPACE = 'http://www.w3.org/1999/xhtml'
-var URL = 'http://userscripts.org/scripts/show/8551'
-var VERSION = '0.0.31'
+if (isGreasemonkey()) {
+    var ep = getPref('exclude_patterns')
+    if (ep && isExclude(ep)) {
+        // FIXME
+        // return
+    }
+}
+else {
+    gmCompatible()
+}
+
+var URL = 'http://autopagerize.net/'
+var VERSION = '0.0.60'
 var DEBUG = false
 var AUTO_START = true
 var CACHE_EXPIRE = 24 * 60 * 60 * 1000
 var BASE_REMAIN_HEIGHT = 400
-var FORCE_TARGET_WINDOW = true
-var USE_COUNTER = true
+var FORCE_TARGET_WINDOW = getPref('force_target_window', true)
+var XHR_TIMEOUT = 30 * 1000
 var SITEINFO_IMPORT_URLS = [
     'http://wedata.net/databases/AutoPagerize/items.json',
 ]
@@ -68,7 +81,7 @@ var AutoPager = function(info) {
     this.info = info
     this.state = AUTO_START ? 'enable' : 'disable'
     var self = this
-    var url = this.getNextURL(info.nextLink, document)
+    var url = this.getNextURL(info.nextLink, document, location.href)
 
     if ( !url ) {
         debug("getNextURL returns null.", info.nextLink)
@@ -99,16 +112,66 @@ var AutoPager = function(info) {
     GM_registerMenuCommand('AutoPagerize - on/off', toggle)
     this.scroll= function() { self.onScroll() }
     window.addEventListener("scroll", this.scroll, false)
-    this.initIcon()
-    this.initHelp()
-    this.icon.addEventListener("mouseover",
-        function(){self.viewHelp()}, true)
+
+    if (isFirefoxExtension()) {
+        var div = document.createElement("div")
+        div.setAttribute('id', 'autopagerize_icon')
+        div.style.display = 'none'
+        document.body.appendChild(div)
+        this.icon = div
+    }
+    else if (isChromeExtension() || isSafariExtension() || isJetpack()) {
+        var frame = document.createElement('iframe')
+        frame.style.display = 'none'
+        frame.style.position = 'fixed'
+        frame.style.bottom = '0px'
+        frame.style.left = '0px'
+        frame.style.height = '25px'
+        frame.style.border = '0px'
+        frame.style.opacity = '0.8'
+        frame.style.zIndex = '1000'
+        frame.width = '100%'
+        frame.scrolling = 'no'
+        this.messageFrame = frame
+        var u = settings['extension_path'] ?
+            settings['extension_path'] + 'loading.html' :
+            'http://autopagerize.net/files/loading.html'
+        this.messageFrame.src = u
+        document.body.appendChild(frame)
+        if (isSafariExtension()) {
+            safari.self.tab.dispatchMessage('launched', {url: location.href })
+        }
+        else if (isChromeExtension()) {
+            chrome.extension.connect({name: "launched"}).postMessage()
+        }
+        if (isJetpack()) {
+            postMessage({name: 'launched', data: location.href })
+        }
+   }
+    else {
+        this.initIcon()
+        this.initHelp()
+        GM_addStyle('@media print{#autopagerize_icon, #autopagerize_help {display: none !important;}}')
+        this.icon.addEventListener("mouseover", function() {
+            self.viewHelp()
+        }, true)
+    }
+
     var scrollHeight = getScrollHeight()
     var bottom = getElementPosition(this.insertPoint).top ||
         this.getPageElementsBottom() ||
         (Math.round(scrollHeight * 0.8))
     this.remainHeight = scrollHeight - bottom + BASE_REMAIN_HEIGHT
     this.onScroll()
+
+    var that = this
+    document.addEventListener('AutoPagerizeToggleRequest', function() {
+        that.toggle()
+    }, false)
+    document.addEventListener('AutoPagerizeUpdateIconRequest', function() {
+        that.updateIcon()
+    }, false)
+    that.updateIcon()
 }
 
 AutoPager.prototype.getPageElementsBottom = function() {
@@ -172,6 +235,7 @@ AutoPager.prototype.initHelp = function() {
     }
     helpDiv.addEventListener('mouseout', proc, false)
     this.helpLayer = helpDiv
+    GM_addStyle('#autopagerize_help a { color: #0f0; text-decoration: underline;}')
 }
 
 AutoPager.prototype.viewHelp = function() {
@@ -198,67 +262,105 @@ AutoPager.prototype.stateToggle = function() {
 
 AutoPager.prototype.enable = function() {
     this.state = 'enable'
-    this.icon.style.background = COLOR['on']
-    this.icon.style.opacity = 1
+    this.updateIcon()
 }
 
 AutoPager.prototype.disable = function() {
     this.state = 'disable'
-    this.icon.style.background = COLOR['off']
-    this.icon.style.opacity = 0.5
+    this.updateIcon()
+}
+
+AutoPager.prototype.updateIcon = function(state) {
+    var st = state || this.state
+    var rename = {'enable': 'on', 'disable': 'off' }
+    if (rename[st]) {
+        st = rename[st]
+    }
+    var color = COLOR[st]
+    if (color) {
+        if (isFirefoxExtension()) {
+            chlorine.pageAction.update(color, location.href)
+        }
+        else if (isChromeExtension()) {
+            chrome.extension.connect({name: "pageActionChannel"}).postMessage(color)
+        }
+        else if (isSafariExtension() || isJetpack()) {
+        }
+        else {
+            this.icon.style.background = color
+        }
+    }
 }
 
 AutoPager.prototype.request = function() {
     if (!this.requestURL || this.lastRequestURL == this.requestURL) {
         return
     }
-
-    if (!this.canHandleCrossDomainRequest()) {
-        return
-    }
-
     this.lastRequestURL = this.requestURL
     var self = this
     var mime = 'text/html; charset=' + document.characterSet
+    var headers = {}
+
+    if (isSameDomain(this.requestURL)) {
+        headers.Cookie = document.cookie
+    }
+    else {
+        this.error()
+        return
+    }
     var opt = {
         method: 'get',
         url: this.requestURL,
+        headers: headers,
         overrideMimeType: mime,
-        onerror: this.error,
-        onload: function(res){
-            self.requestLoad.apply(self, [res])
+        onerror: function(res) {
+            self.error()
+        },
+        onload: function(res) {
+            if (res.finalUrl && location.host == res.finalUrl.split('/')[2]) {
+                self.requestLoad.apply(self, [res])
+            }
+            else {
+                self.error()
+            }
         }
     }
-    this.showLoading(true)
-    GM_xmlhttpRequest(opt)
+    AutoPager.requestFilters.forEach(function(i) { i(opt) }, this)
+    if (opt.stop) {
+        this.requestURL = opt.url
+    }
+    else {
+        this.showLoading(true)
+        GM_xmlhttpRequest(opt)
+    }
 }
 
 AutoPager.prototype.showLoading = function(sw) {
     if (sw) {
-        this.icon.style.background = COLOR['loading']
+        this.updateIcon('loading')
+        if (this.messageFrame && settings['display_message_bar']) {
+            this.messageFrame.style.display = 'block'
+        }
     }
     else {
-        this.icon.style.background = COLOR['on']
+        this.updateIcon('enable')
+        if (this.messageFrame) {
+            this.messageFrame.style.display = 'none'
+        }
     }
 }
 
 AutoPager.prototype.requestLoad = function(res) {
-    if (!this.canHandleCrossDomainRequest()) {
-        return
-    }
-
-    if (res.finalUrl) {
-        this.requestURL = res.finalUrl
-    }
-
-    var t = res.responseText
-    var htmlDoc = createHTMLDocumentByString(t)
+    AutoPager.responseFilters.forEach(function(i) {
+        i(res, this.requestURL)
+    }, this)
+    var htmlDoc = createHTMLDocumentByString(res.responseText)
     AutoPager.documentFilters.forEach(function(i) {
         i(htmlDoc, this.requestURL, this.info)
     }, this)
     try {
         var page = getElementsByXPath(this.info.pageElement, htmlDoc)
-        var url = this.getNextURL(this.info.nextLink, htmlDoc)
+        var url = this.getNextURL(this.info.nextLink, htmlDoc, this.requestURL)
     }
     catch(e){
         log(e)
@@ -290,11 +392,15 @@ AutoPager.prototype.requestLoad = function(res) {
         debug('nextLink not found.', this.info.nextLink, htmlDoc)
         this.terminate()
     }
+    var ev = document.createEvent('Event')
+    ev.initEvent('GM_AutoPagerizeNextPageLoaded', true, false)
+    document.dispatchEvent(ev)
 }
 
 AutoPager.prototype.addPage = function(htmlDoc, page) {
-    var hr = document.createElementNS(HTML_NAMESPACE, 'hr')
-    var p = document.createElementNS(HTML_NAMESPACE, 'p')
+    var HTML_NS  = 'http://www.w3.org/1999/xhtml'
+    var hr = document.createElementNS(HTML_NS, 'hr')
+    var p  = document.createElementNS(HTML_NS, 'p')
     hr.setAttribute('class', 'autopagerize_page_separator')
     p.setAttribute('class', 'autopagerize_page_info')
     var self = this
@@ -322,10 +428,15 @@ AutoPager.prototype.addPage = function(htmlDoc, page) {
     }
 
     p.innerHTML = 'page: <a class="autopagerize_link" href="' +
-        this.requestURL + '">' + (++this.pageNum) + '</a>'
+        this.requestURL.replace(/&/g, '&amp;') + '">' + (++this.pageNum) + '</a>'
     return page.map(function(i) {
         var pe = document.importNode(i, true)
         self.insertPoint.parentNode.insertBefore(pe, self.insertPoint)
+        var ev = document.createEvent('MutationEvent')
+        ev.initMutationEvent('AutoPagerize_DOMNodeInserted', true, false,
+                             self.insertPoint.parentNode, null,
+                             self.requestURL, null, null)
+        pe.dispatchEvent(ev)
         return pe
     })
 }
@@ -351,186 +462,56 @@ AutoPager.prototype.initIcon = function() {
     this.icon = div
 }
 
-AutoPager.prototype.getNextURL = function(xpath, doc) {
-    var next = getFirstElementByXPath(xpath, doc)
-    if (next) {
-        var url = next.href || next.action || next.value
-        if (!url.match(/^http:/)) {
-            url = pathToURL(url)
+AutoPager.prototype.getNextURL = function(xpath, doc, url) {
+    var nextLink = getFirstElementByXPath(xpath, doc)
+    if (nextLink) {
+        var nextValue = nextLink.getAttribute('href') ||
+            nextLink.getAttribute('action') || nextLink.value
+        if (nextValue.match(/^http(s)?:/)) {
+            return nextValue
         }
-        return url
-    }
-}
-
-AutoPager.prototype.canHandleCrossDomainRequest = function() {
-    if (!supportsFinalUrl()) {
-        if (!isSameDomain(this.requestURL)) {
-            this.error()
-            return false
+        else {
+            var base = getFirstElementByXPath('//base[@href]', doc)
+            return resolvePath(nextValue, (base ? base.href : url))
         }
     }
-    return true
 }
 
 AutoPager.prototype.terminate = function() {
-    this.icon.style.background = COLOR['terminated']
     window.removeEventListener('scroll', this.scroll, false)
+    this.updateIcon('terminated')
     var self = this
     setTimeout(function() {
-        self.icon.parentNode.removeChild(self.icon)
+        if (self.icon) {
+            self.icon.parentNode.removeChild(self.icon)
+        }
+        if (isSafariExtension()) {
+            var mf = self.messageFrame
+            mf.parentNode.removeChild(mf)
+        }
     }, 1500)
 }
 
 AutoPager.prototype.error = function() {
-    this.icon.style.background = COLOR['error']
+    this.updateIcon('error')
     window.removeEventListener('scroll', this.scroll, false)
+    if (isSafariExtension() || isChromeExtension() || isJetpack()) {
+        var mf = this.messageFrame
+        var u = settings['extension_path'] ?
+            settings['extension_path'] + 'error.html' :
+            'http://autopagerize.net/files/error.html'
+        mf.src = u
+        mf.style.display = 'block'
+        setTimeout(function() {
+            mf.parentNode.removeChild(mf)
+        }, 3000)
+    }
 }
 
 AutoPager.documentFilters = []
+AutoPager.requestFilters = []
+AutoPager.responseFilters = []
 AutoPager.filters = []
-
-function Counter() {}
-Counter.DATA_KEY = 'counter_data'
-
-Counter.get = function() {
-    return eval(GM_getValue(Counter.DATA_KEY)) || {}
-}
-
-Counter.set = function(val) {
-    return GM_setValue(Counter.DATA_KEY, uneval(val))
-}
-
-Counter.up = function() {
-    var date = new Date()
-    var date_y = date.getFullYear()
-    var date_m = date.getMonth() + 1
-    var date_d = date.getDate()
-    var counter_data = Counter.get()
-    counter_data[date_y] = counter_data[date_y] || {}
-    counter_data[date_y][date_m] = counter_data[date_y][date_m] || {}
-    counter_data[date_y][date_m][date_d] =
-        (counter_data[date_y][date_m][date_d] || 0) + 1
-    Counter.set(counter_data)
-    return counter_data[date_y][date_m][date_d]
-}
-
-Counter.reset = function() {
-    return Counter.set({})
-}
-
-Counter.total = function() {
-    var total = 0
-    var counter_data = Counter.get()
-    for (var year in counter_data) {
-        for (var month in counter_data[year]) {
-            for (var date in counter_data[year][month]) {
-                total += counter_data[year][month][date]
-            }
-        }
-    }
-    return total
-}
-
-Counter.view = function() {
-    var div = Counter.layer()
-    var couter_data = Counter.get()
-    var comp = function(a, b) { return b - a }
-    Counter.each(couter_data,function(year, year_data) {
-        Counter.each(year_data, function(month, month_data) {
-            var img = document.createElement('img')
-            img.src = Counter.chart(year, month, month_data)
-            div.appendChild(img)
-        }, comp)
-    }, comp)
-    window.scrollTo(0, 0)
-}
-
-Counter.layer = function() {
-    var id = 'autopagerize_count_chart'
-    var e = document.getElementById(id)
-    if (e) {
-        e.parentNode.removeChild(e)
-    }
-    var div = document.createElement('div')
-    div.id = id
-    div.style.position = 'absolute'
-    div.style.top = '0px'
-    div.style.left = '0px'
-    div.style.width = '100%'
-    div.style.border = '1px solid #ccc'
-    div.style.backgroundColor = '#fff'
-    div.style.zIndex = '100'
-    document.body.appendChild(div)
-    var h1 = document.createElement('h1')
-    h1.appendChild(document.createTextNode('AutoPagerize Count Chart: ' + Counter.total()))
-    div.appendChild(h1)
-    return div
-}
-
-Counter.each = function(obj, func, comp) {
-    var ks = []
-    for (var k in obj) {
-        ks.push(k)
-    }
-    if (comp) {
-        ks.sort(comp)
-    }
-    for (var i = 0; i < ks.length; i++) {
-        func(ks[i], obj[ks[i]])
-    }
-}
-
-Counter.chart = function(year, month, month_data) {
-    var max = 0
-    var total = 0
-    var x_label = []
-    var val = []
-    for (var i = 1; i <= 31; i++) {
-        var v = month_data[i] || 0
-        x_label.push(i)
-        val.push(v)
-        max = Math.max(max, v)
-        total += v
-    }
-    var range = Counter.ceil(max)
-    var y_label = []
-    for (var i = 0; i <= 10; i++) {
-        y_label.push(range / 10 * i)
-    }
-    var xl = function(num, list) {
-        return num + ':|' + list.join('|') + '|'
-    }
-    var url = 'http://chart.apis.google.com/chart?' +
-        'cht=bvs&chs=500x250&chbh=10&chxt=x,y,x&chco=adff2f' +
-        '&chd=t:' + val.join(',') +
-        '&chxl=' + xl(0, x_label) + xl(1, y_label) + xl(2, ['  total: ' + total]) +
-        '&chds=0,' + (range * 1.1) +
-        '&chtt=' + year + '/' + month
-    return url
-}
-
-Counter.ceil = function(val) {
-    var n = 1
-    var limit = 100
-    for (var i = 0; i < limit; i++) {
-        if (n > val) {
-            return n
-        }
-        n = n * 5
-        if (n > val) {
-            return n
-        }
-        n = n * 2
-    }
-}
-
-if (USE_COUNTER) {
-    GM_registerMenuCommand('AutoPagerize - count chart', Counter.view)
-    AutoPager.documentFilters.push(function() {
-        Counter.up()
-    })
-}
-
 
 var parseInfo = function(str) {
     var lines = str.split(/\r\n|\r|\n/)
@@ -593,7 +574,12 @@ var clearCache = function() {
     GM_setValue('cacheInfo', '')
 }
 var getCache = function() {
-    return eval(GM_getValue('cacheInfo')) || {}
+    try {
+        return JSON.parse(GM_getValue('cacheInfo')) || {}
+    }
+    catch(e) {
+        return {}
+    }
 }
 var getCacheCallback = function(res, url) {
     if (res.status != 200) {
@@ -602,33 +588,32 @@ var getCacheCallback = function(res, url) {
 
     var info
     try {
-        info = eval(res.responseText).map(function(i) { return i.data })
+        info = JSON.parse(res.responseText).map(function(i) { return i.data })
     }
     catch(e) {
         info = []
-        var matched = false
-        var hdoc = createHTMLDocumentByString(res.responseText)
-        var textareas = getElementsByXPath(
-            '//*[@class="autopagerize_data"]', hdoc)
-        textareas.forEach(function(textarea) {
-            var d = parseInfo(textarea.value)
-            if (d) {
-                info.push(d)
-                if (!matched && location.href.match(d.url)) {
-                    matched = d
-                }
-            }
-        })
     }
     if (info.length > 0) {
         info = info.filter(function(i) { return ('url' in i) })
         info.sort(function(a, b) { return (b.url.length - a.url.length) })
+
+        var r_keys = ['url', 'nextLink', 'insertBefore', 'pageElement']
+        info = info.map(function(i) {
+            var item = {}
+            r_keys.forEach(function(key) {
+                if (i[key]) {
+                    item[key] = i[key]
+                }
+            })
+            return item
+        })
+
         cacheInfo[url] = {
             url: url,
             expire: new Date(new Date().getTime() + CACHE_EXPIRE),
             info: info
         }
-        GM_setValue('cacheInfo', cacheInfo.toSource())
+        GM_setValue('cacheInfo', JSON.stringify(cacheInfo))
         launchAutoPager(info)
     }
     else {
@@ -651,20 +636,37 @@ var getCacheErrorCallback = function(url) {
     GM_setValue('cacheInfo', cacheInfo.toSource())
 }
 
-if (FORCE_TARGET_WINDOW) {
-    var setTargetBlank = function(doc) {
-        var anchers = getElementsByXPath('descendant-or-self::a', doc)
-        anchers.forEach(function(i) {
-            if (i.getAttribute('href') &&
-                !i.getAttribute('href').match(/^#/) &&
-                !i.getAttribute('href').match(/^javascript\:/) &&
-                i.className.indexOf('autopagerize_link') < 0) {
-                i.target = '_blank'
-            }
+var linkFilter = function(doc, url) {
+    var base = getFirstElementByXPath('//base[@href]', doc)
+    var baseUrl = base ? base.href : url
+    var isSameBase = isSameBaseUrl(location.href, baseUrl)
+    if (!FORCE_TARGET_WINDOW && isSameBase) {
+        return
+    }
+
+    var anchors = getElementsByXPath('descendant-or-self::a[@href]', doc)
+    anchors.forEach(function(i) {
+        var attrHref = i.getAttribute('href')
+        if (FORCE_TARGET_WINDOW && !attrHref.match(/^#|^javascript:/) &&
+            i.className.indexOf('autopagerize_link') < 0) {
+            i.target = '_blank'
+        }
+        if (!isSameBase && !attrHref.match(/^#|^\w+:/)) {
+            i.href = resolvePath(i.getAttribute('href'), baseUrl)
+        }
+    })
+
+    if (!isSameBase) {
+        var images = getElementsByXPath('descendant-or-self::img', doc)
+        images.forEach(function(i) {
+            i.src = resolvePath(i.getAttribute('src'), baseUrl)
         })
     }
-    AutoPager.documentFilters.push(setTargetBlank)
 }
+AutoPager.documentFilters.push(linkFilter)
+
+fixResolvePath()
+
 if (typeof(window.AutoPagerize) == 'undefined') {
     window.AutoPagerize = {}
     window.AutoPagerize.addFilter = function(f) {
@@ -673,48 +675,168 @@ if (typeof(window.AutoPagerize) == 'undefined') {
     window.AutoPagerize.addDocumentFilter = function(f) {
         AutoPager.documentFilters.push(f)
     }
+    window.AutoPagerize.addResponseFilter = function(f) {
+        AutoPager.responseFilters.push(f)
+    }
+    window.AutoPagerize.addRequestFilter = function(f) {
+        AutoPager.requestFilters.push(f)
+    }
+    window.AutoPagerize.launchAutoPager = launchAutoPager
+
+    var ev = document.createEvent('Event')
+    ev.initEvent('GM_AutoPagerizeLoaded', true, false)
+    document.dispatchEvent(ev)
 }
 
-GM_registerMenuCommand('AutoPagerize - clear cache', clearCache)
+var settings = {}
 var ap = null
-launchAutoPager(SITEINFO)
-var cacheInfo = getCache()
-SITEINFO_IMPORT_URLS.forEach(function(i) {
-    if (!cacheInfo[i] || cacheInfo[i].expire < new Date()) {
-        var opt = {
-            method: 'get',
-            url: i,
-            onload: function(res) {getCacheCallback(res, i)},
-            onerror: function(res){getCacheErrorCallback(i)},
+if (isChromeExtension()) {
+    var port = chrome.extension.connect({name: "settingsChannel"})
+    port.postMessage()
+    port.onMessage.addListener(function(res) {
+        settings = res
+        if (res['exclude_patterns'] && isExclude(res['exclude_patterns'])) {
+            return
         }
-        GM_xmlhttpRequest(opt)
+        launchAutoPager(SITEINFO)
+        var port_ = chrome.extension.connect({name: "siteinfoChannel"})
+        port_.postMessage({ url: location.href })
+        port_.onMessage.addListener(function(res) {
+            launchAutoPager(res)
+            chrome.extension.onConnect.addListener(function(port) {
+                if (port.name == "toggleRequestChannel") {
+                    port.onMessage.addListener(function(msg) {
+                        if (ap) {
+                            ap.toggle()
+                        }
+                    })
+                }
+            })
+        })
+    })
+}
+else if (isSafariExtension()) {
+    var re_exclude = /^(about:|safari-extension:)/
+    if (!location.href.match(re_exclude)) {
+        safari.self.addEventListener('message', function(event) {
+            if (event.name === 'settings') {
+                settings = event.message
+                safari.self.tab.dispatchMessage('siteinfoChannel', {url: location.href })
+            }
+            else if (event.name === 'siteinfoChannel') {
+                if (!settings['exclude_patterns'] || !isExclude(settings['exclude_patterns'])) {
+                    launchAutoPager(SITEINFO)
+                    launchAutoPager([MICROFORMAT])
+                    launchAutoPager(event.message)
+                }
+            }
+            else if (event.name === 'toggleRequestChannel') {
+                if (ap) {
+                    ap.toggle()
+                }
+            }
+            else if (event.name === 'updateSettings') {
+                settings = event.message
+            }
+        }, false)
+        safari.self.tab.dispatchMessage('settings')
     }
-    else {
-        launchAutoPager(cacheInfo[i].info)
+}
+else if (isJetpack()) {
+    postMessage({ name: 'settings' })
+    onMessage = function(message) {
+        if (message.name == 'siteinfo') {
+            // launchAutoPager(SITEINFO)
+            launchAutoPager(message.data)
+        }
+        else if (message.name == 'settings') {
+            settings = message.data
+            if (settings['exclude_patterns'] && isExclude(settings['exclude_patterns'])) {
+                // return
+            }
+            else  {
+                postMessage({ name: 'siteinfo', url: location.href })
+                launchAutoPager([MICROFORMAT])
+            }
+        }
     }
-})
-launchAutoPager([MICROFORMAT])
-return
+}
+else {
+    launchAutoPager(SITEINFO)
+    GM_registerMenuCommand('AutoPagerize - clear cache', clearCache)
+    var cacheInfo = getCache()
+    var xhrStates = {}
+    SITEINFO_IMPORT_URLS.forEach(function(i) {
+        if (!cacheInfo[i] || new Date(cacheInfo[i].expire) < new Date()) {
+            var opt = {
+                method: 'get',
+                url: i,
+                onload: function(res) {
+                    xhrStates[i] = 'loaded'
+                    getCacheCallback(res, i)
+                },
+                onerror: function(res){
+                    xhrStates[i] = 'error'
+                    getCacheErrorCallback(i)
+                },
+            }
+            xhrStates[i] = 'start'
+            GM_xmlhttpRequest(opt)
+            setTimeout(function() {
+                if (xhrStates[i] == 'start') {
+                    getCacheErrorCallback(i)
+                }
+            }, XHR_TIMEOUT)
+        }
+        else {
+            launchAutoPager(cacheInfo[i].info)
+        }
+    })
+    launchAutoPager([MICROFORMAT])
+}
+
+
+// new google search sucks!
+if (location.href.match('^http://[^.]+\.google\.(?:[^.]{2,3}\.)?[^./]{2,3}/.*(&fp=)')) {
+    var to = location.href.replace(/&fp=.*/, '')
+    // console.log([location.href, to])
+    location.href = to
+}
+
+
+
 
 // utility functions.
 function createHTMLDocumentByString(str) {
-    var html = str.replace(/<!DOCTYPE.*?>/, '').replace(/<html.*?>/, '').replace(/<\/html>.*/, '')
-    var htmlDoc  = document.implementation.createDocument(null, 'html', null)
+    if (document.documentElement.nodeName != 'HTML') {
+        return new DOMParser().parseFromString(str, 'application/xhtml+xml')
+    }
+    var html = strip_html_tag(str)
+    var htmlDoc
+    try {
+        // We have to handle exceptions since Opera 9.6 throws
+        // a NOT_SUPPORTED_ERR exception for |document.cloneNode(false)|
+        // against the DOM 3 Core spec.
+        htmlDoc = document.cloneNode(false)
+        htmlDoc.appendChild(htmlDoc.importNode(document.documentElement, false))
+    }
+    catch(e) {
+        htmlDoc = document.implementation.createDocument(null, 'html', null)
+    }
     var fragment = createDocumentFragmentByString(html)
     try {
         fragment = htmlDoc.adoptNode(fragment)
-    } catch(e) {
+    }
+    catch(e) {
         fragment = htmlDoc.importNode(fragment, true)
     }
     htmlDoc.documentElement.appendChild(fragment)
-   return htmlDoc
+    return htmlDoc
 }
 
 function getElementsByXPath(xpath, node) {
-    var node = node || document
-    var doc = node.ownerDocument ? node.ownerDocument : node
-    var nodesSnapshot = doc.evaluate(xpath, node, null,
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null)
+    var nodesSnapshot = getXPathResult(xpath, node,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE)
     var data = []
     for (var i = 0; i < nodesSnapshot.snapshotLength; i++) {
         data.push(nodesSnapshot.snapshotItem(i))
@@ -723,11 +845,54 @@ function getElementsByXPath(xpath, node) {
 }
 
 function getFirstElementByXPath(xpath, node) {
+    var result = getXPathResult(xpath, node,
+        XPathResult.FIRST_ORDERED_NODE_TYPE)
+    return result.singleNodeValue
+}
+
+function getXPathResult(xpath, node, resultType) {
     var node = node || document
-    var doc = node.ownerDocument ? node.ownerDocument : node
-    var result = doc.evaluate(xpath, node, null,
-        XPathResult.FIRST_ORDERED_NODE_TYPE, null)
-    return result.singleNodeValue ? result.singleNodeValue : null
+    var doc = node.ownerDocument || node
+    var resolver = doc.createNSResolver(node.documentElement || node)
+    // Use |node.lookupNamespaceURI('')| for Opera 9.5
+    var defaultNS = node.lookupNamespaceURI(null)
+
+    if (defaultNS) {
+        const defaultPrefix = '__default__'
+        xpath = addDefaultPrefix(xpath, defaultPrefix)
+        var defaultResolver = resolver
+        resolver = function (prefix) {
+            return (prefix == defaultPrefix)
+                ? defaultNS : defaultResolver.lookupNamespaceURI(prefix)
+        }
+    }
+    return doc.evaluate(xpath, node, resolver, resultType, null)
+}
+
+function addDefaultPrefix(xpath, prefix) {
+    const tokenPattern = /([A-Za-z_\u00c0-\ufffd][\w\-.\u00b7-\ufffd]*|\*)\s*(::?|\()?|(".*?"|'.*?'|\d+(?:\.\d*)?|\.(?:\.|\d+)?|[\)\]])|(\/\/?|!=|[<>]=?|[\(\[|,=+-])|([@$])/g
+    const TERM = 1, OPERATOR = 2, MODIFIER = 3
+    var tokenType = OPERATOR
+    prefix += ':'
+    function replacer(token, identifier, suffix, term, operator, modifier) {
+        if (suffix) {
+            tokenType =
+                (suffix == ':' || (suffix == '::' &&
+                 (identifier == 'attribute' || identifier == 'namespace')))
+                ? MODIFIER : OPERATOR
+        }
+        else if (identifier) {
+            if (tokenType == OPERATOR && identifier != '*') {
+                token = prefix + token
+            }
+            tokenType = (tokenType == TERM) ? OPERATOR : TERM
+        }
+        else {
+            tokenType = term ? TERM : operator ? OPERATOR : MODIFIER
+        }
+        return token
+    }
+    return xpath.replace(tokenPattern, replacer)
 }
 
 function createDocumentFragmentByString(str) {
@@ -747,7 +912,7 @@ function log(message) {
 
 function debug() {
     if ( typeof DEBUG != 'undefined' && DEBUG ) {
-        console.log.apply(this, arguments)
+        console.log.apply(console, arguments)
     }
 }
 
@@ -786,17 +951,142 @@ function getScrollHeight() {
                                 document.body.scrollHeight)
 }
 
-function pathToURL(path) {
-    var link = document.createElement('a')
-    link.href = path
-    return link.href
-}
-
 function isSameDomain(url) {
-    return location.host == url.split('/')[2]
+    if (url.match(/^\w+:/)) {
+        var url_s = url.split(/[\/\?]/)
+        return url_s[0] == location.protocol && location.host == url_s[2]
+    }
+    else {
+        return true
+    }
 }
 
-function supportsFinalUrl() {
-    return (GM_getResourceURL)
+function isSameBaseUrl(urlA, urlB) {
+    return (urlA.replace(/[^/]+$/, '') == urlB.replace(/[^/]+$/, ''))
 }
 
+function resolvePath(path, base) {
+    if (path.match(/^https?:\/\//)) {
+        return path
+    }
+    if (path.match(/^\?/)) {
+        return base.replace(/\?.+$/, '') + path;
+    }
+    if (path.match(/^[^\/]/)) {
+        return base.replace(/[^/]+$/, '') + path
+    }
+    else {
+        return base.replace(/([^/]+:\/\/[^/]+)\/.*/, '\$1') + path
+    }
+}
+
+function fixResolvePath() {
+    if (resolvePath('', 'http://resolve.test/') == 'http://resolve.test/') {
+        return
+    }
+    // A workaround for WebKit and Mozilla 1.9.2a1pre,
+    // which don't support XML Base in HTML.
+    // https://bugs.webkit.org/show_bug.cgi?id=17423
+    // https://bugzilla.mozilla.org/show_bug.cgi?id=505783
+    var XML_NS = 'http://www.w3.org/XML/1998/namespace'
+    var baseElement = document.createElementNS(null, 'base')
+    var pathElement = document.createElementNS(null, 'path')
+    baseElement.appendChild(pathElement)
+    resolvePath = function resolvePath_workaround(path, base) {
+        baseElement.setAttributeNS(XML_NS, 'xml:base', base)
+        pathElement.setAttributeNS(XML_NS, 'xml:base', path)
+        return pathElement.baseURI
+    }
+}
+
+function strip_html_tag(str) {
+    var chunks = str.split(/(<html(?:[ \t\r\n][^>]*)?>)/)
+    if (chunks.length >= 3) {
+        chunks.splice(0, 2)
+    }
+    str = chunks.join('')
+    chunks = str.split(/(<\/html[ \t\r\n]*>)/)
+    if (chunks.length >= 3) {
+        chunks.splice(chunks.length - 2)
+    }
+    return chunks.join('')
+}
+
+function getPref(key, defaultValue) {
+    var value = GM_getValue(key)
+    return (typeof value == 'undefined') ? defaultValue : value
+}
+
+function wildcard2regep(str) {
+    return '^' + str.replace(/([-()\[\]{}+?.$\^|,:#<!\\])/g, '\\$1').replace(/\x08/g, '\\x08').replace(/\*/g, '.*')
+}
+
+function isExclude(patterns) {
+    var rr = /^\/(.+)\/$/
+    var eps = (patterns || '').split(/[\r\n ]+/)
+    for (var i = 0; i < eps.length; i++) {
+        var reg = null
+        if (rr.test(eps[i])) {
+            reg = eps[i].match(rr)[1]
+        }
+        else {
+            reg = wildcard2regep(eps[i])
+        }
+        if (location.href.match(reg)) {
+            return true
+        }
+    }
+    return false
+}
+// obsolete
+function isFirefoxExtension() {
+    return (typeof chlorine == 'object')
+}
+
+function isChromeExtension() {
+    return (typeof chrome == 'object') &&
+        (typeof chrome.extension == 'object')
+}
+
+function isSafariExtension() {
+    return (typeof safari == 'object') &&
+        (typeof safari.extension == 'object')
+}
+
+function isGreasemonkey() {
+    return (typeof GM_log == 'function')
+}
+
+function isJetpack() {
+    // isFirefoxExtension is obsolete
+    return (!isGreasemonkey() && !isSafariExtension() &&
+            !isChromeExtension() && !isFirefoxExtension())
+}
+
+function gmCompatible() {
+    GM_registerMenuCommand = function() {}
+    GM_setValue = function() {}
+    GM_getValue = function() {}
+    GM_addStyle = function() {}
+    uneval = function() {}
+    fixResolvePath = function() {}
+    resolvePath = function (path, base) { return path }
+
+    if (isChromeExtension() || isSafariExtension()) {
+        createHTMLDocumentByString = function(str) {
+            if (document.documentElement.nodeName != 'HTML') {
+                return new DOMParser().parseFromString(str, 'application/xhtml+xml')
+            }
+            // FIXME
+            var html = str.replace(/<script(?:[ \t\r\n][^>]*)?>[\S\s]*?<\/script[ \t\r\n]*>|<\/?(?:i?frame|html|script|object)(?:[ \t\r\n][^<>]*)?>/gi, ' ')
+            var htmlDoc = document.implementation.createHTMLDocument ?
+                document.implementation.createHTMLDocument('apfc') :
+                document.implementation.createDocument(null, 'html', null)
+            var range = document.createRange()
+            range.selectNodeContents(document.documentElement)
+            htmlDoc.documentElement.appendChild(range.createContextualFragment(html))
+            return htmlDoc
+        }
+    }
+    return true
+}
